@@ -32,84 +32,224 @@ PATTERNS = [
     (
         "raw_superglobal_in_sql",
         re.compile(
-            r"""(?:mysqli_query|->query|\$wpdb->query|\$wpdb->get_(?:results|row|var|col))\s*\(\s*[^)]*\$_(?:GET|POST|REQUEST|COOKIE)""",
-            re.IGNORECASE,
+            r"""
+            (?:
+                mysqli_query|
+                mysql_query|
+                ->query|
+                \$wpdb->query|
+                \$wpdb->get_(?:results|row|var|col)
+            )
+            \s*\(
+            [^;)]*
+            \$_(?:GET|POST|REQUEST|COOKIE)
+            """,
+            re.IGNORECASE | re.VERBOSE,
         ),
-        "Possible SQL injection: superglobal concatenated directly into a query call.",
+        "Possible SQL injection: request data appears directly in a database query call.",
     ),
     (
-        "wpdb_prepare_missing_concat",
-        re.compile(r"""\$wpdb->query\s*\(\s*["'].*\.\s*\$""", re.IGNORECASE),
-        "Query string built via concatenation instead of $wpdb->prepare().",
+        "wpdb_query_string_concat",
+        re.compile(
+            r"""
+            \$wpdb->(?:query|get_results|get_row|get_var|get_col)
+            \s*\(
+            [^)]*
+            (?:\$_(?:GET|POST|REQUEST|COOKIE)|\$\w+)
+            \s*\.
+            """,
+            re.IGNORECASE | re.VERBOSE,
+        ),
+        "Possible SQL injection: query appears to be built using string concatenation instead of $wpdb->prepare().",
     ),
     (
-        "unserialize_call",
-        re.compile(r"""\bunserialize\s*\(""", re.IGNORECASE),
-        "unserialize() on potentially attacker-controlled data can lead to PHP object injection.",
+        "wpdb_prepare_missing_variable_query",
+        re.compile(
+            r"""
+            \$wpdb->(?:query|get_results|get_row|get_var|get_col)
+            \s*\(
+            \s*\$
+            """,
+            re.IGNORECASE | re.VERBOSE,
+        ),
+        "Database query uses a variable query string - inspect whether it was safely prepared.",
+    ),
+    (
+        "unserialize_user_input",
+        re.compile(
+            r"""
+            unserialize
+            \s*\(
+            \s*(?:\$_(?:GET|POST|REQUEST|COOKIE)|\$\w+)
+            """,
+            re.IGNORECASE | re.VERBOSE,
+        ),
+        "Potential PHP object injection: unserialize() may process attacker-controlled data.",
     ),
     (
         "eval_call",
-        re.compile(r"""\beval\s*\(""", re.IGNORECASE),
-        "eval() use - check whether input reaching it is attacker-influenced.",
-    ),
-    (
-        "extract_call",
-        re.compile(r"""\bextract\s*\(\s*\$_(?:GET|POST|REQUEST)""", re.IGNORECASE),
-        "extract() on user input can clobber arbitrary variables.",
-    ),
-    (
-        "missing_nonce_ajax",
         re.compile(
-            r"""add_action\s*\(\s*['"]wp_ajax(?:_nopriv)?_[^'"]+['"]\s*,\s*['"][^'"]+['"]\s*\)""",
+            r"""\beval\s*\(""",
             re.IGNORECASE,
         ),
-        "AJAX action registered - verify the handler calls check_ajax_referer()/wp_verify_nonce().",
+        "Dangerous code execution sink: verify whether eval() receives attacker-controlled content.",
     ),
     (
-        "missing_cap_check_marker",
-        re.compile(r"""add_action\s*\(\s*['"]admin_post""", re.IGNORECASE),
-        "admin-post hook registered - verify current_user_can() gate exists in the handler.",
-    ),
-    (
-        "file_write_funcs",
+        "dynamic_include_request",
         re.compile(
-            r"""\b(?:file_put_contents|fwrite|fopen)\s*\([^)]*\$_(?:GET|POST|REQUEST|FILES)""",
-            re.IGNORECASE,
+            r"""
+            \b(?:include|include_once|require|require_once)
+            \s*\(?\s*
+            (?:\$_(?:GET|POST|REQUEST)|\$\w+)
+            """,
+            re.IGNORECASE | re.VERBOSE,
         ),
-        "File write using request data - check path traversal / arbitrary file write potential.",
+        "Dynamic file inclusion detected - inspect whether the path can be influenced externally.",
     ),
     (
-        "file_upload_no_ext_check",
-        re.compile(r"""\$_FILES\[[^\]]+\]\[['"]tmp_name['"]\]""", re.IGNORECASE),
-        "File upload handling present - verify extension/mime allowlist and upload directory restrictions.",
-    ),
-    (
-        "include_require_dynamic",
+        "command_execution_sink",
         re.compile(
-            r"""\b(?:include|include_once|require|require_once)\s*\(?\s*\$_(?:GET|POST|REQUEST)""",
-            re.IGNORECASE,
+            r"""
+            \b(?:system|exec|shell_exec|passthru|popen|proc_open)
+            \s*\(
+            """,
+            re.IGNORECASE | re.VERBOSE,
         ),
-        "Dynamic include/require from request data - local/remote file inclusion risk.",
+        "Command execution function detected - inspect argument sources for user-controlled data.",
     ),
     (
-        "system_exec_calls",
-        re.compile(r"""\b(?:system|exec|shell_exec|passthru|popen|proc_open)\s*\(""", re.IGNORECASE),
-        "Command execution function present - check whether arguments touch user input.",
+        "file_write_user_controlled",
+        re.compile(
+            r"""
+            \b(?:file_put_contents|fwrite|fopen)
+            \s*\(
+            [^)]*
+            (?:\$_(?:GET|POST|REQUEST|FILES)|\$\w+)
+            """,
+            re.IGNORECASE | re.VERBOSE,
+        ),
+        "Possible arbitrary file write: filesystem operation receives variable/request-derived data.",
+    ),
+    (
+        "upload_handling",
+        re.compile(
+            r"""
+            \$_FILES
+            \s*\[
+            """,
+            re.IGNORECASE | re.VERBOSE,
+        ),
+        "File upload functionality detected - verify extension checks, MIME validation, and upload handling APIs.",
+    ),
+    (
+        "move_uploaded_file",
+        re.compile(
+            r"""
+            move_uploaded_file
+            \s*\(
+            """,
+            re.IGNORECASE | re.VERBOSE,
+        ),
+        "Uploaded file is moved manually - verify wp_handle_upload() or equivalent security checks are used.",
+    ),
+    (
+        "missing_nonce_ajax_handler",
+        re.compile(
+            r"""
+            add_action
+            \s*\(
+            \s*['"]wp_ajax(?:_nopriv)?_[^'"]+
+            """,
+            re.IGNORECASE | re.VERBOSE,
+        ),
+        "WordPress AJAX endpoint registered - verify handler uses nonce validation and authorization checks.",
+    ),
+    (
+        "admin_post_handler",
+        re.compile(
+            r"""
+            add_action
+            \s*\(
+            \s*['"]admin_post
+            """,
+            re.IGNORECASE | re.VERBOSE,
+        ),
+        "admin-post endpoint registered - verify callback performs capability checks.",
+    ),
+    (
+        "rest_route_registration",
+        re.compile(
+            r"""
+            register_rest_route
+            \s*\(
+            """,
+            re.IGNORECASE | re.VERBOSE,
+        ),
+        "REST API endpoint registered - verify permission_callback restricts access appropriately.",
+    ),
+    (
+        "unsafe_option_write",
+        re.compile(
+            r"""
+            update_option
+            \s*\(
+            [^)]*
+            (?:\$_(?:GET|POST|REQUEST)|\$\w+)
+            """,
+            re.IGNORECASE | re.VERBOSE,
+        ),
+        "Potential stored input issue: user-controlled data written into WordPress options.",
+    ),
+    (
+        "xss_output_raw_echo",
+        re.compile(
+            r"""
+            echo
+            \s+
+            (?:\$_(?:GET|POST|REQUEST|COOKIE)|\$\w+)
+            """,
+            re.IGNORECASE | re.VERBOSE,
+        ),
+        "Potential XSS: variable output directly without visible escaping.",
+    ),
+    (
+        "xss_print_raw_output",
+        re.compile(
+            r"""
+            print
+            \s+
+            (?:\$_(?:GET|POST|REQUEST|COOKIE)|\$\w+)
+            """,
+            re.IGNORECASE | re.VERBOSE,
+        ),
+        "Potential XSS: variable printed directly without visible escaping.",
     ),
     (
         "disabled_ssl_verify",
-        re.compile(r"""sslverify['"]?\s*=>\s*false""", re.IGNORECASE),
-        "TLS verification disabled on an HTTP request (wp_remote_* args).",
+        re.compile(
+            r"""
+            sslverify
+            \s*['"]?\s*
+            =>
+            \s*false
+            """,
+            re.IGNORECASE | re.VERBOSE,
+        ),
+        "TLS certificate verification disabled for HTTP requests.",
     ),
     (
         "hardcoded_secret_marker",
-        re.compile(r"""(?:api[_-]?key|secret|password)\s*=\s*['"][A-Za-z0-9_\-]{10,}['"]""", re.IGNORECASE),
-        "Possible hardcoded credential/secret.",
-    ),
-    (
-        "old_php_baseline",
-        re.compile(r"""Requires PHP:\s*5\.[0-9]""", re.IGNORECASE),
-        "Plugin declares a very old minimum PHP version - often correlates with copy-pasted/tutorial-derived code.",
+        re.compile(
+            r"""
+            (?:api[_-]?key|secret|password|token)
+            \s*=
+            \s*['"]
+            [A-Za-z0-9_\-]{10,}
+            ['"]
+            """,
+            re.IGNORECASE | re.VERBOSE,
+        ),
+        "Possible hardcoded credential or API secret.",
     ),
 ]
 
@@ -137,7 +277,7 @@ def fetch_plugin_list(browse: str, pages: int, per_page: int):
     return plugins
 
 
-def download_plugin_zip(slug: str, version: str = None) -> bytes:
+def download_plugin_zip(slug: str, version: str = "") -> bytes:
     url = f"{DOWNLOAD_BASE}{slug}.zip" if not version else f"{DOWNLOAD_BASE}{slug}.{version}.zip"
     resp = requests.get(url, timeout=60)
     resp.raise_for_status()
